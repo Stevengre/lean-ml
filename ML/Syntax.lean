@@ -4,7 +4,7 @@ import Lean.Data.Format
 import Lean.Compiler.ExternAttr
 import Lean.Compiler.IR.Basic
 import Lean.Data.HashSet
-
+import STd.Data.Nat
 
 namespace AML
 
@@ -16,7 +16,7 @@ class HasIdx (α : Type) where
 /-- Element Variable: x -/
 structure Evar where
   idx : IR.Index
-  deriving Inhabited, Repr
+  deriving Inhabited, DecidableEq, Repr
 
 instance : BEq Evar := ⟨fun a b => a.idx == b.idx⟩
 instance : ToString Evar := ⟨fun a => "x_" ++ toString a.idx⟩
@@ -27,7 +27,7 @@ instance : HasIdx Evar := ⟨fun a => a.idx⟩
 /-- Set Variable: X -/
 structure Svar where
   idx : IR.Index
-  deriving Inhabited, Repr
+  deriving Inhabited, Repr, DecidableEq
 
 instance : BEq Svar := ⟨fun a b => a.idx == b.idx⟩
 instance : ToString Svar := ⟨fun a => "X_" ++ toString a.idx⟩
@@ -38,7 +38,7 @@ instance : HasIdx Svar := ⟨fun a => a.idx⟩
 /-- Constant Symbol: σ -/
 structure Symbol where
   idx : IR.Index
-  deriving Inhabited, Repr
+  deriving Inhabited, Repr, DecidableEq
 
 instance : BEq Symbol := ⟨fun a b => a.idx == b.idx⟩
 instance : ToString Symbol := ⟨fun a => "σ_" ++ toString a.idx⟩
@@ -55,7 +55,17 @@ inductive Pattern where
   | implies : Pattern → Pattern → Pattern
   | exists : Evar → Pattern → Pattern
   | mu : Svar → Pattern → Pattern
-  deriving Repr, BEq
+  deriving Repr, BEq, DecidableEq
+
+def Pattern.size : Pattern → Nat
+  | Pattern.evar _     => Nat.succ Nat.zero
+  | Pattern.svar _     => Nat.succ Nat.zero
+  | Pattern.symbol _   => Nat.succ Nat.zero
+  | Pattern.app p1 p2  => Nat.succ (Nat.add p1.size p2.size)
+  | Pattern.bot        => Nat.succ Nat.zero
+  | Pattern.implies p1 p2 => Nat.succ (Nat.add p1.size p2.size)
+  | Pattern.exists _ p => Nat.succ p.size
+  | Pattern.mu _ p     => Nat.succ p.size
 
 /-- Free Variables -/
 def Pattern.FV : Pattern → (HashSet IR.Index × HashSet  IR.Index)
@@ -86,11 +96,21 @@ def newIdx (V : HashSet IR.Index) : IR.Index :=
 -- capture-avoiding variables
 def Pattern.CAEVar (p : Pattern) : IR.Index := newIdx p.FV.1
 def Pattern.CASVar (p : Pattern) : IR.Index := newIdx p.FV.2
-def CAEVar (p₁ p₂ : Pattern) : IR.Index := newIdx (p₁.FV.1.insertMany p₂.FV.1)
-def CASVar (p₁ p₂ : Pattern) : IR.Index := newIdx (p₁.FV.2.insertMany p₂.FV.2)
+def getCAEVar (p₁ p₂ : Pattern) : IR.Index := newIdx (p₁.FV.1.insertMany p₂.FV.1)
+def getCASVar (p₁ p₂ : Pattern) : IR.Index := newIdx (p₁.FV.2.insertMany p₂.FV.2)
 def Pattern.isCAEVar (p : Pattern) (e : IR.Index) : Bool := ¬(p.FV.1.contains e)
 def Pattern.isCASVar (p : Pattern) (s : IR.Index) : Bool := ¬(p.FV.2.contains s)
 
+def Pattern.renameE (old new :IR.Index) : Pattern → Pattern
+  | Pattern.evar e         => if e.idx == old then Pattern.evar (Evar.mk new) else Pattern.evar e
+  | Pattern.svar s         => Pattern.svar s
+  | Pattern.symbol s       => Pattern.symbol s
+  | Pattern.app p₁ p₂      => Pattern.app (p₁.renameE old new) (p₂.renameE old new)
+  | Pattern.bot            => Pattern.bot
+  | Pattern.implies p₁ p₂  => Pattern.implies (p₁.renameE old new) (p₂.renameE old new)
+  | Pattern.exists e p'    => if e.idx == old then Pattern.exists (Evar.mk new) (p'.renameE old new) else Pattern.exists e (p'.renameE old new)
+  | Pattern.mu s p'        => Pattern.mu s (p'.renameE old new)
+  -- termination_by _ => p.size
 
 def Pattern.alphaRename (ρₑ ρₛ : IR.IndexRenaming) : Pattern → (Pattern × IR.IndexRenaming × IR.IndexRenaming)
   | Pattern.evar e         => let new_e := Evar.mk (ρₑ.find? e.idx |>.getD e.idx)
@@ -123,6 +143,7 @@ def Pattern.alphaRename (ρₑ ρₛ : IR.IndexRenaming) : Pattern → (Pattern 
                                 (Pattern.mu new_s' p'', ρₑ', ρₛ')
 
 /-- α-equivalence -/
+-- 下面的似乎用处不大
 def Var.alphaEqv {α : Type} [HasIdx α] (ρ : IR.IndexRenaming) (v₁ v₂ : α) : Bool :=
   match ρ.find? (HasIdx.getIdx v₁) with
   | some v => v == HasIdx.getIdx v₂
@@ -143,150 +164,98 @@ def Pattern.alphaEqv (ρₑ ρₛ : IR.IndexRenaming) : Pattern → Pattern → 
   | _, _ => false
 
 -- Todo: 自动获取Index Renaming
--- Todo: Pattern Normalization
 -- Todo: Prove the Correctness of α-renaming
+-- 上面的似乎用处不大
+
+-- Todo: Pattern Normalization
 -- Todo: add toString, toFormat, hashable, BEq, etc.
 -- instance : BEq Pattern := ⟨fun a b => Pattern.alphaEqv RBMap.empty RBMap.empty a b⟩
 
--- #eval (Pattern.exists (Evar.mk 0) (Pattern.evar (Evar.mk 0))) == (Pattern.exists (Evar.mk 1) (Pattern.evar (Evar.mk 1)))
+/-- Constructors -/
+-- x
+def MLevar (x : IR.Index) : Pattern := Pattern.evar (Evar.mk x)
+-- X
+def MLsvar (x : IR.Index) : Pattern := Pattern.svar (Svar.mk x)
+-- σ
+def MLsymbol (x : IR.Index) : Pattern := Pattern.symbol (Symbol.mk x)
+-- φ1 φ2
+def MLapp (x y : Pattern) : Pattern := Pattern.app x y
+-- ⊥
+def MLbot : Pattern := Pattern.bot
+-- φ1 → φ2
+def MLimplies (x y : Pattern) : Pattern := Pattern.implies x y
+-- ∃x . φ
+def MLexists (x : IR.Index) (y : Pattern) : Pattern := Pattern.exists (Evar.mk x) y
+-- μX . φ
+def MLmu (x : IR.Index) (y : Pattern) : Pattern := Pattern.mu (Svar.mk x) y
+-- Sugars
+-- ¬φ ≡ φ → ⊥
+def MLnot (x : Pattern) : Pattern := MLimplies x MLbot
+-- φ1 ∨ φ2 ≡ ¬φ1 → φ2
+def MLor (x y : Pattern) : Pattern := MLimplies (MLnot x) y
+-- φ1 ∧ φ2 ≡ ¬(¬φ1 ∨ ¬φ2)
+def MLand (x y : Pattern) : Pattern := MLnot (MLor (MLnot x) (MLnot y))
+-- φ1 ↔ φ2 ≡ (φ1 → φ2) ∧ (φ2 → φ1)
+def MLiff (x y : Pattern) : Pattern := MLand (MLimplies x y) (MLimplies y x)
+-- ⊤ ≡ ¬⊥
+def MLtop : Pattern := MLnot MLbot
+-- ∀x . φ ≡ ¬∃x . ¬φ
+def MLforall (x : IR.Index) (y : Pattern) : Pattern := MLnot (MLexists x (MLnot y))
+-- νX . φ ≡ ¬μX . ¬φ[¬X/X] // if φ is positive in X
+-- Todo: positive 判定
+def Pattern.negS (X : Svar) : Pattern → Pattern
+  | Pattern.evar e         => Pattern.evar e
+  | Pattern.svar s         => if s == X then MLnot (MLsvar s.idx) else Pattern.svar s
+  | Pattern.symbol s       => Pattern.symbol s
+  | Pattern.app p₁ p₂      => Pattern.app (p₁.negS X) (p₂.negS X)
+  | Pattern.bot            => Pattern.bot
+  | Pattern.implies p₁ p₂  => Pattern.implies (p₁.negS X) (p₂.negS X)
+  | Pattern.exists e p'    => Pattern.exists e (p'.negS X)
+  | Pattern.mu s p'        => Pattern.mu s (p'.negS X)
+def MLnu (x : IR.Index) (y : Pattern) : Pattern := MLnot (MLmu x (MLnot (y.negS (Svar.mk x))))
+-- def MLnu (x : IR.Index) (y : Pattern) : Pattern := MLnot (MLmu x (MLnot y))
+
+/-- Substitution -/
+abbrev Subst := RBMap IR.Index Pattern compare
+
+def Pattern.subst (ρₑ ρₛ : Subst) (p : Pattern) : Pattern :=
+  match p with
+  | Pattern.evar e         => match ρₑ.find? e.idx with
+                              | some p => p
+                              | none   => Pattern.evar e
+  | Pattern.svar s         => match ρₛ.find? s.idx with
+                              | some p => p
+                              | none   => Pattern.svar s
+  | Pattern.symbol s       => Pattern.symbol s
+  | Pattern.app p₁ p₂      => Pattern.app (p₁.subst ρₑ ρₛ) (p₂.subst ρₑ ρₛ)
+  | Pattern.bot            => Pattern.bot
+  | Pattern.implies p₁ p₂  => Pattern.implies (p₁.subst ρₑ ρₛ) (p₂.subst ρₑ ρₛ)
+  -- Check if capturing-avoid:
+  | Pattern.exists e p'    => if ρₑ.contains e.idx then
+                                let sbt := ρₑ.find? e.idx |>.getD Pattern.bot
+                                let new_e := getCAEVar sbt p'
+                                let p'' := p'.renameE e.idx new_e
+                                Pattern.exists (Evar.mk new_e) (p''.subst ρₑ ρₛ)
+                              else
+                                Pattern.exists e (p'.subst ρₑ ρₛ)
+  | Pattern.mu s p'        => if ρₛ.contains s.idx then
+                                let sbt := ρₛ.find? s.idx |>.getD Pattern.bot
+                                let new_s := getCASVar sbt p'
+                                let new_p' := p'.alphaRename RBMap.empty (RBMap.empty.insert s.idx new_s) |>.1
+                                Pattern.mu (Svar.mk new_s) (new_p'.subst ρₑ ρₛ)
+                              else
+                                Pattern.mu s (p'.subst ρₑ ρₛ)
+  termination_by _ => p.size
+  decreasing_by sorry
 
 end AML
 
 
 
 
--- instance : ToString Evar where
---   toString := λ e => match e with | Evar.mk s => s
-
--- -- Set Variable
--- inductive Svar : Type
---   | mk : String → Svar
---   deriving DecidableEq, Hashable, Repr
-
--- instance : ToString Svar where
---   toString := λ e => match e with | Svar.mk s => s
-
--- -- Variable (Auxiliary)
--- inductive Var : Type
---   | e : Evar → Var
---   | s : Svar → Var
---   deriving DecidableEq, Hashable, Repr
-
--- -- Constant Symbol
--- inductive Symbol : Type
---   | mk : String → Symbol
---   deriving DecidableEq, Repr
-
--- -- Σ-Patterns
--- inductive Pattern : Type
---   | evar : Evar → Pattern
---   | svar : Svar → Pattern
---   | symbol : Symbol → Pattern
---   | app : Pattern → Pattern → Pattern
---   | bot : Pattern
---   | implies : Pattern → Pattern → Pattern
---   | exists : Evar → Pattern → Pattern
---   | mu : Svar → Pattern → Pattern
---   deriving DecidableEq, Repr
-
--- -- α-renaming
-
--- def generate_new_var {α : Type} (e : α) () [ToString α] : String :=
---   match e with
---   | x => (ToString.to_string x) ++ "'"
-
--- def generate_new_evar (e : Evar) : Evar :=
---   match e with
---   | Evar.mk x => Evar.mk (x ++ "'")
-
--- def generate_new_svar (e : Svar) : Svar :=
---   match e with
---   | Svar.mk x => Svar.mk (x ++ "'")
-
--- def renameVar (map : Lean.HashMap Var Var) (e : Var) : Var :=
---   map.find? e |>.getD e
-
--- def alphaRenameAndFV (map : Map Var Var) (p : Pattern) : (Pattern × Set Var) :=
---   let rec aux (map : Map Var Var) (p : Pattern) : (Pattern × Set Var) :=
---     match p with
---     | evar e => (evar (renameVar map e), {e})
---     | svar s => (svar s, {s})
---     | symbol sym => (symbol sym, ∅)
---     | app p1 p2 =>
---       let (p1', fv1) := aux map p1
---       let (p2', fv2) := aux map p2
---       (app p1' p2', fv1 ∪ fv2)
---     | bot => (bot, ∅)
---     | implies p1 p2 =>
---       let (p1', fv1) := aux map p1
---       let (p2', fv2) := aux map p2
---       (implies p1' p2', fv1 ∪ fv2)
---     | exists e p' =>
---       let new_e := generate_new_evar e
---       let new_map := map.insert e new_e
---       let (p'', fv) := aux new_map p'
---       (exists new_e p'', fv \ {new_e})
---     | mu s p' =>
---       let (p'', fv) := aux map p'
---       (mu s p'', fv)
---   in aux map p
-
--- -- Free Variables
-
--- -- def FV (p : Pattern) : Set (Evar × Svar) :=
--- --   match p with
--- --   | Pattern.evar e => {e}
--- --   | Pattern.svar s => {s}
--- --   | Pattern.symbol _ => ∅
--- --   | Pattern.app p1 p2 => FV p1 ∪ FV p2
--- --   | Pattern.bot => ∅
--- --   | Pattern.implies p1 p2 => FV p1 ∪ FV p2
--- --   | Pattern.exists e p' => FV p' \ {e}  -- 移除 e，因为它是绑定的
--- --   | mu s p' => FV p' \ {s}  -- 移除 s，因为它是绑定的
--- --   end
-
--- -- Constructors
--- -- x
--- def MLevar (x : String) : Pattern := Pattern.evar (Evar.mk x)
--- -- X
--- def MLsvar (x : String) : Pattern := Pattern.svar (Svar.mk x)
--- -- σ
--- def MLsymbol (x : String) : Pattern := Pattern.symbol (Symbol.mk x)
--- -- φ1 φ2
--- def MLapp (x y : Pattern) : Pattern := Pattern.app x y
--- -- ⊥
--- def MLbot : Pattern := Pattern.bot
--- -- φ1 → φ2
--- def MLimplies (x y : Pattern) : Pattern := Pattern.implies x y
--- -- ∃x . φ
--- def MLexists (x : String) (y : Pattern) : Pattern := Pattern.exists (Evar.mk x) y
--- -- μX . φ
--- def MLmu (x : String) (y : Pattern) : Pattern := Pattern.mu (Svar.mk x) y
--- -- Sugars
--- -- ¬φ ≡ φ → ⊥
--- def MLnot (x : Pattern) : Pattern := MLimplies x MLbot
--- -- φ1 ∨ φ2 ≡ ¬φ1 → φ2
--- def MLor (x y : Pattern) : Pattern := MLimplies (MLnot x) y
--- -- φ1 ∧ φ2 ≡ ¬(¬φ1 ∨ ¬φ2)
--- def MLand (x y : Pattern) : Pattern := MLnot (MLor (MLnot x) (MLnot y))
--- -- φ1 ↔ φ2 ≡ (φ1 → φ2) ∧ (φ2 → φ1)
--- def MLiff (x y : Pattern) : Pattern := MLand (MLimplies x y) (MLimplies y x)
--- -- ⊤ ≡ ¬⊥
--- def MLtop : Pattern := MLnot MLbot
--- -- ∀x . φ ≡ ¬∃x . ¬φ
--- def MLforall (x : String) (y : Pattern) : Pattern := MLnot (MLexists x (MLnot y))
--- -- νX . φ ≡ ¬μX . ¬φ[¬X/X] // if φ is positive in X
 
 
 
--- -- Substitution
--- inductive Subst : Type
---   | evar : Evar → Pattern → Subst
---   | svar : Svar → Pattern → Subst
---   deriving DecidableEq, Repr
-
--- def MLEsubst (x : String) (y : Pattern) : Subst := Subst.evar (Evar.mk x) y
--- def MLSsubst (x : String) (y : Pattern) : Subst := Subst.svar (Svar.mk x) y
 
 
 
