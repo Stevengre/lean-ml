@@ -5,6 +5,7 @@ import Lean.Compiler.ExternAttr
 import Lean.Compiler.IR.Basic
 import Lean.Data.HashSet
 import STd.Data.Nat
+import Mathlib.Tactic.LibrarySearch
 
 namespace AML
 
@@ -248,22 +249,7 @@ def Pattern.subst (ρₑ ρₛ : Subst) (p : Pattern) : Pattern :=
   termination_by _ => p.size
   decreasing_by sorry
 
+
 end AML
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def hello := "world"
